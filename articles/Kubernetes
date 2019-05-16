@@ -1,0 +1,169 @@
+- Ubuntu 18.04 部署 Kubernetes 1.11.5 (单Master)
+https://kubernetes.io/zh/docs/setup/independent/install-kubeadm/#%E5%87%86%E5%A4%87%E5%BC%80%E5%A7%8B
+
+apt install docker.io -y
+root@ye-virtual-machine:~# docker version
+Client:
+ Version:           18.09.4
+ API version:       1.39
+ Go version:        go1.10.8
+ Git commit:        d14af54266
+ Built:             Wed Mar 27 18:35:44 2019
+ OS/Arch:           linux/amd64
+ Experimental:      false
+
+Server: Docker Engine - Community
+ Engine:
+  Version:          18.09.4
+  API version:      1.39 (minimum version 1.12)
+  Go version:       go1.10.8
+  Git commit:       d14af54
+  Built:            Wed Mar 27 18:01:48 2019
+  OS/Arch:          linux/amd64
+  Experimental:     false
+root@ye-virtual-machine:~#
+
+增加kubernetes aliyun镜像源
+apt-get update && apt-get install -y apt-transport-https
+curl https://mirrors.aliyun.com/kubernetes/apt/doc/apt-key.gpg | apt-key add - 
+cat <<EOF >/etc/apt/sources.list.d/kubernetes.list
+deb https://mirrors.aliyun.com/kubernetes/apt/ kubernetes-xenial main
+EOF
+
+安装kubeadm/kubelet/kubectl
+apt-get update
+apt-get install -y kubelet kubeadm kubectl
+apt-mark hold kubelet kubeadm kubectl
+因为需要指定kubernetes version=1.11.5,所以kubelet kubeadm kubectl版本要一致
+apt-get update
+apt-get install -y kubelet=1.11.5-00
+apt-get install -y kubeadm=1.11.5-00
+apt-get install -y kubectl=1.11.5-00
+若提示
+下列软件包有未满足的依赖关系：
+ kubelet : 依赖: kubernetes-cni (= 0.6.0) 但是 0.7.5-00 正要被安装
+E: 无法修正错误，因为您要求某些软件包保持现状，就是它们破坏了软件包间的依赖关系。
+重新安装kubernetes-cni= 0.6.0即可
+apt-get install kubernetes-cni=0.6.0-00
+
+关闭swap
+swapoff -a
+vim /etc/fstab 注释掉swapfile那一行
+
+配置docker mirror
+创建（或修改）/etc/docker/daemon.json。官方中国镜像速度还行。
+{
+"registry-mirrors": ["https://registry.docker-cn.com"]
+}
+重启docker服务
+systemctl restart docker
+
+拉取k8s的包并tag, 因为墙的原因无法直接从gcr.io拉取
+首先查询下当前版本需要哪些docker image。
+$ kubeadm config images list --kubernetes-version v1.11.5
+k8s.gcr.io/kube-apiserver-amd64:v1.11.5
+k8s.gcr.io/kube-controller-manager-amd64:v1.11.5
+k8s.gcr.io/kube-scheduler-amd64:v1.11.5
+k8s.gcr.io/kube-proxy-amd64:v1.11.5
+k8s.gcr.io/pause:3.1
+k8s.gcr.io/etcd-amd64:3.2.18
+k8s.gcr.io/coredns:1.1.3
+
+使用以下sh拉取并tag
+#!/bin/bash
+images=(
+    kube-apiserver-amd64:v1.11.5
+    kube-controller-manager-amd64:v1.11.5
+    kube-scheduler-amd64:v1.11.5
+    kube-proxy-amd64:v1.11.5
+    pause:3.1
+    etcd-amd64:3.2.18
+    coredns:1.1.3
+)
+
+for imageName in ${images[@]} ; do
+    docker pull registry.cn-hangzhou.aliyuncs.com/google_containers/$imageName
+    docker tag registry.cn-hangzhou.aliyuncs.com/google_containers/$imageName k8s.gcr.io/$imageName
+done
+
+kubeadm init --kubernetes-version v1.11.5
+[init] using Kubernetes version: v1.11.5
+[preflight] running pre-flight checks
+I0516 19:27:29.506772   59573 kernel_validator.go:81] Validating kernel version
+I0516 19:27:29.507464   59573 kernel_validator.go:96] Validating kernel config
+[preflight] The system verification failed. Printing the output from the verification:
+KERNEL_VERSION: 4.18.0-15-generic
+CONFIG_NAMESPACES: enabled
+CONFIG_NET_NS: enabled
+CONFIG_PID_NS: enabled
+CONFIG_IPC_NS: enabled
+CONFIG_UTS_NS: enabled
+CONFIG_CGROUPS: enabled
+CONFIG_CGROUP_CPUACCT: enabled
+CONFIG_CGROUP_DEVICE: enabled
+CONFIG_CGROUP_FREEZER: enabled
+CONFIG_CGROUP_SCHED: enabled
+CONFIG_CPUSETS: enabled
+CONFIG_MEMCG: enabled
+CONFIG_INET: enabled
+CONFIG_EXT4_FS: enabled
+CONFIG_PROC_FS: enabled
+CONFIG_NETFILTER_XT_TARGET_REDIRECT: enabled (as module)
+CONFIG_NETFILTER_XT_MATCH_COMMENT: enabled (as module)
+CONFIG_OVERLAY_FS: enabled (as module)
+CONFIG_AUFS_FS: enabled (as module)
+CONFIG_BLK_DEV_DM: enabled
+DOCKER_VERSION: 18.09.4
+OS: Linux
+CGROUPS_CPU: enabled
+CGROUPS_CPUACCT: enabled
+CGROUPS_CPUSET: enabled
+CGROUPS_DEVICES: enabled
+CGROUPS_FREEZER: enabled
+CGROUPS_MEMORY: enabled
+[preflight] Some fatal errors occurred:
+        [ERROR SystemVerification]: unsupported docker version: 18.09.4
+[preflight] If you know what you are doing, you can make a check non-fatal with `--ignore-preflight-errors=...`
+
+kubeadm init --kubernetes-version v1.11.2 --ignore-preflight-errors=SystemVerification
+
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+部署weave网络
+sysctl net.bridge.bridge-nf-call-iptables=1 -w
+kubectl apply -f "https://cloud.weave.works/k8s/net?k8s-version=$(kubectl version | base64 | tr -d '\n')"
+
+因为我只有1个节点，要“计算资源”的话，就只能将master节点的taint去掉，否则普通的Pod默认不会调度上来。
+kubectl taint nodes --all node-role.kubernetes.io/master-
+
+dashboard
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/dashboard/v1.10.1/src/deploy/recommended/kubernetes-dashboard.yaml
+
+skip dashboard login
+cat <<EOF | kubectl create -f -
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: kubernetes-dashboard
+  labels:
+    k8s-app: kubernetes-dashboard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: kubernetes-dashboard
+  namespace: kube-system
+EOF
+
+kubectl edit deployment/kubernetes-dashboard --namespace=kube-system
+containers:
+      - args:
+        - --auto-generate-certificates
+        - --enable-skip-login            # <-- add this line
+        image: k8s.gcr.io/kubernetes-dashboard-amd64:v1.10.1
+
+kubectl proxy
